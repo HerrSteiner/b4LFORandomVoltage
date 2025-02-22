@@ -1,71 +1,29 @@
 #include <Arduino.h>
 
 #define SAMPLE_RATE 48000
-#define PHASE_RESOLUTION 32  // Phase accumulator uses 32-bit resolution
-#define ADC_MAX 4095         // 12-bit ADC max value
-#define DAC_MAX 1023         // 10-bit DAC max value
+#define frequencyPot A1
+#define tiltPot A2
 
-volatile uint32_t phase = 0;             // Phase accumulator (Q16.16 fixed-point)
-volatile uint32_t phaseIncrement = 0;   // Phase increment (controls frequency)
-volatile int16_t waveformTilt = 0;      // Tilt factor: -32768 (down-ramp) to +32768 (up-ramp)
+const uint32_t maxAnalogIn = 4095;
+const uint32_t maxAnalogOut = 1023;
+const uint32_t shiftfactor = 1024;
 
-void setup() {
-  analogReadResolution(12);  // 12-bit ADC
-  analogWriteResolution(10); // 10-bit DAC
-  analogWrite(A0, 0);
-  pinMode(1, INPUT);
-  pinMode(2, INPUT);
-  // Configure timer interrupt for LFO generation
-  tcConfigure(SAMPLE_RATE);
-}
+typedef enum {
+  ATTACK,
+  SUSTAIN,
+  RELEASE
+} ARstate;
 
-void loop() {
-  // Read potentiometer values
-  uint16_t potFreq = analogRead(A1);  // Frequency control
-  uint16_t potTilt = analogRead(A2); // Waveform tilt control
+struct ARData {
+  uint32_t inc = 0;
+  uint32_t phase_accumulator = maxAnalogIn;
+  uint32_t frequency = 0;
+  uint32_t tilt = 0;
+  uint32_t frequencyCounter = 0;
+  ARstate state = ATTACK;
+};
 
-  // Map potentiometer values to frequency and tilt range
-  float lfoFreq = map(potFreq, 0, ADC_MAX, 0.1f * (1 << 16), 30.0f * (1 << 16)); // Q16.16
-  waveformTilt = map(potTilt, 0, ADC_MAX, -32768, 32767);                        // Q15.16
-
-  // Update phase increment
-  phaseIncrement = (uint32_t)(lfoFreq * (1.0f / SAMPLE_RATE));
-}
-
-void TC4_Handler() {
-  
-
-  // Update phase
-  phase += phaseIncrement;
-
-  // Generate waveform
-  uint16_t dacValue = generateWaveform(phase, waveformTilt);
-
-  // Output waveform to DAC
-  DAC->DATA.reg = dacValue;
-
-  // Clear the interrupt flag
-  TC4->COUNT16.INTFLAG.bit.OVF = 1;
-}
-
-uint16_t generateWaveform(uint32_t phase, int16_t tilt) {
-  // Phase mapped to 0-1 as a Q16.16 fraction
-  uint16_t phaseFraction = (phase >> 16) & 0xFFFF;
-
-  // Calculate waveform value based on tilt
-  int32_t waveformValue;
-  if (tilt < 0) {
-    // Down-ramp to triangle
-    waveformValue = (phaseFraction * (32768 + tilt)) >> 15;
-  } else {
-    // Triangle to up-ramp
-    waveformValue = (phaseFraction * (32768 - tilt)) >> 15;
-  }
-
-  // Wrap waveformValue to DAC range
-  waveformValue = constrain(waveformValue, 0, DAC_MAX);
-  return (uint16_t)waveformValue;
-}
+volatile struct ARData ar;
 
 void tcConfigure(int sampleRate) {
   GCLK->CLKCTRL.reg = GCLK_CLKCTRL_CLKEN |  // Connect GCLK0 at 48MHz as a clock source for TC4 and TC5
@@ -83,4 +41,68 @@ void tcConfigure(int sampleRate) {
   TC4->COUNT16.CTRLA.bit.ENABLE = 1;  // Enable timer TC4
   while (TC4->COUNT16.STATUS.bit.SYNCBUSY)
     ;  // Wait for synchronization
+}
+
+void TC4_Handler() {
+  uint32_t sample = 0;
+  uint32_t accumulator = ar.phase_accumulator;
+
+  ar.frequencyCounter+= ar.inc;
+  if (ar.frequencyCounter > (maxAnalogIn << 4)) {
+    ar.frequencyCounter = 0;
+    switch (ar.state) {
+      case ATTACK:
+        accumulator+= (1 + ar.tilt);
+        if (accumulator >= maxAnalogIn * maxAnalogIn) {
+          accumulator = maxAnalogIn * maxAnalogIn;
+          ar.state = RELEASE;
+        }
+        break;
+      case SUSTAIN:
+        break;
+      case RELEASE:
+         int32_t signedAccumulator = accumulator - (1 + (maxAnalogIn - ar.tilt) );
+            if (signedAccumulator <= 0) {
+                accumulator = 0;
+                ar.state = ATTACK;
+            }
+            else {
+              accumulator = (uint32_t) signedAccumulator;
+            }
+        break;
+    }
+    ar.phase_accumulator = accumulator;
+    sample = accumulator >> 14;
+    DAC->DATA.reg = sample;
+  }
+  TC4->COUNT16.INTFLAG.bit.OVF = 1;  // Clear the interrupt flag
+}
+
+void setup() {
+  analogWriteResolution(10);
+  analogWrite(A0, 0);
+  analogReadResolution(12);
+  pinMode(frequencyPot, INPUT);
+  pinMode(tiltPot, INPUT);
+
+  tcConfigure(SAMPLE_RATE);
+}
+
+uint16_t counter = 1000;
+void loop() {
+  counter++;
+  if (counter > 100) {
+    ar.frequency = analogRead(frequencyPot);
+    if (ar.frequency == 0) {
+      ar.frequency = 1;
+    }
+    uint32_t tilt = analogRead(tiltPot);
+    
+    ar.tilt = tilt;//map(tilt,0,maxAnalogIn,25,maxAnalogIn - 25); //(tilt * maxAnalogIn) / (tilt + (maxAnalogIn - tilt));
+    //uint32_t period = (2 * maxAnalogIn * maxAnalogIn) / ar.tilt + 
+    //                (2 * maxAnalogIn * maxAnalogIn) / (maxAnalogIn - ar.tilt);
+    uint32_t compensation = tilt > (maxAnalogIn>>1) ? map(tilt,(maxAnalogIn>>1), maxAnalogIn,  1, maxAnalogIn) : map(tilt,0,(maxAnalogIn>>1),maxAnalogIn,1);
+    ar.inc = (ar.frequency * (compensation));// - (compensation >> 2);
+    counter = 0;
+  }
 }
