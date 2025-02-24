@@ -1,3 +1,30 @@
+/*
+b4LFORandomVoltage module firmware
+Copyright (C) 2025 Malte Steiner
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+/*
+firmware for XIAO SAMD21 based modulator module for my modular synthesizer
+it consists of 3 modes:
+AR: it is a attack release envelope, needs a trigger. Pots control attack and release time, there is a gate output for peak sustain and a trigger output when release ended
+LFO: the same but looping, doesn´t react on trigger input
+Random Voltage: trigger input causes the DAC to output a random voltage. Another trigger output triggers randomly and one trigger output triggers regular like a clock,
+the frequencies are controlled with the two pots independently. 
+*/
+
 #include <Arduino.h>
 
 #define SAMPLE_RATE 48000
