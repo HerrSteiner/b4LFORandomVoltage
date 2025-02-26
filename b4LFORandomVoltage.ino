@@ -44,6 +44,7 @@ const uint32_t maxAnalogOut = 1023;
 const uint32_t shiftfactor = 1024;
 const uint32_t peakValue = maxAnalogIn * maxAnalogIn;
 const uint32_t freqScale = shiftfactor * 32;
+const uint32_t scaleThreshold = maxAnalogIn - 100;
 
 typedef enum {
   ATTACK,
@@ -226,7 +227,7 @@ void setup() {
 uint16_t counter = 1000;
 void loop() {
   counter++;
-  if (counter > 100) {
+  if (counter > 10) {
     uint32_t trigger = digitalRead(triggerInput) == LOW ? HIGH : LOW; // trigger is inverted
     ar.trigger = trigger;
     if (trigger == LOW) {
@@ -235,6 +236,15 @@ void loop() {
 
     uint32_t release = analogRead(releasePot) + 10;
     uint32_t attack = analogRead(attackPot) + 10;
+
+    // give both times a bit boost in the last segment of the potentiometers
+    if (attack > scaleThreshold){ 
+    attack = map(attack,scaleThreshold,maxAnalogIn,scaleThreshold,peakValue);
+    }
+    if (release > scaleThreshold){
+    release = map(release,scaleThreshold,maxAnalogIn,scaleThreshold,peakValue);
+    }
+
     ar.inc = (attack * freqScale) / SAMPLE_RATE;
     ar.dec = (release * freqScale) / SAMPLE_RATE;
 
