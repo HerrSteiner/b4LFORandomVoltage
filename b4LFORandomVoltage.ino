@@ -30,8 +30,9 @@ the frequencies are controlled with the two pots independently.
 #define SAMPLE_RATE 48000
 #define attackPot A1
 #define releasePot A2
-#define ARModeSwitch D3
+#define LFOModeSwitch D3
 #define RandomModeSwitch D4
+#define triggerInput D6
 #define peakTrigger D7
 #define peakLED D8
 #define endTrigger D9
@@ -47,10 +48,12 @@ const uint32_t freqScale = shiftfactor * 32;
 typedef enum {
   ATTACK,
   SUSTAIN,
-  RELEASE
+  RELEASE,
+  END
 } ARstate;
 
 typedef enum {
+  START,
   LFO,
   AR,
   RANDOM
@@ -61,11 +64,12 @@ struct ARData {
   uint32_t dec = 0;
   uint32_t phase_accumulator = maxAnalogIn;
   uint32_t random_accumulator = 0;
-  uint32_t attack = 0;  // the value of the attack potentiometer
-  ARstate state = ATTACK;
+  uint32_t trigger = 0;         // the value of the attack potentiometer
   uint32_t peakLEDCounter = 0;  // determines how long the LED is led
   uint32_t endLEDCounter = 0;
-  Mode modus = RANDOM;
+  ARstate state = ATTACK;
+  Mode modus = START;
+  bool generated = false;  // used in the random generator mode
 };
 
 volatile struct ARData ar;
@@ -105,7 +109,7 @@ void TC4_Handler() {
           }
           break;
         case SUSTAIN:
-          break;
+        case END:
         case RELEASE:
           int32_t signedAccumulator = accumulator - ar.dec;
           if (signedAccumulator <= 0) {
@@ -121,9 +125,57 @@ void TC4_Handler() {
       }
       ar.phase_accumulator = accumulator;
       sample = accumulator >> 14;
+      DAC->DATA.reg = sample;
+      break;
+
+    case AR:
+      if (ar.trigger == HIGH) {
+        if (ar.state == SUSTAIN) {
+          ar.peakLEDCounter = LEDSHINETIME;  // keep the flame burning
+        } else {
+          ar.state = ATTACK;
+          accumulator += ar.inc;
+          if (accumulator >= peakValue) {
+            accumulator = peakValue;
+            ar.state = SUSTAIN;
+            digitalWrite(peakTrigger, HIGH);
+            digitalWrite(peakLED, HIGH);
+            ar.peakLEDCounter = LEDSHINETIME;
+          }
+          ar.phase_accumulator = accumulator;
+          sample = accumulator >> 14;
+          DAC->DATA.reg = sample;
+        }
+      } else {
+        if (ar.state != END) {
+          ar.state = RELEASE;
+          int32_t signedAccumulator = accumulator - ar.dec;
+          if (signedAccumulator <= 0) {
+            accumulator = 0;
+            ar.state = END;
+            digitalWrite(endTrigger, HIGH);
+            digitalWrite(endLED, HIGH);
+            ar.endLEDCounter = LEDSHINETIME;
+          } else {
+            accumulator = (uint32_t)signedAccumulator;
+          }
+          ar.phase_accumulator = accumulator;
+          sample = accumulator >> 14;
+          DAC->DATA.reg = sample;
+        }
+      }
+
       break;
 
     case RANDOM:  // ------------- random voltage generator / clock mode ----------------------------
+
+      // random generator part
+      if (ar.trigger == HIGH && ar.generated == false) {
+        sample = random(maxAnalogOut);
+        ar.generated = true;
+        DAC->DATA.reg = sample;
+      }
+
       // clock part
       accumulator += ar.dec;  // the release decrement is used as increment in this mode
       if (accumulator >= peakValue) {
@@ -150,7 +202,6 @@ void TC4_Handler() {
       break;
   }
 
-  DAC->DATA.reg = sample;
   TC4->COUNT16.INTFLAG.bit.OVF = 1;  // Clear the interrupt flag
 }
 
@@ -158,16 +209,17 @@ void setup() {
   analogWriteResolution(10);
   analogWrite(A0, 0);
   analogReadResolution(12);
-  
+
   pinMode(attackPot, INPUT);
   pinMode(releasePot, INPUT);
-  pinMode(ARModeSwitch, INPUT);
+  pinMode(LFOModeSwitch, INPUT);
   pinMode(RandomModeSwitch, INPUT);
+  pinMode(triggerInput, INPUT);
 
   pinMode(peakTrigger, OUTPUT);
   pinMode(peakLED, OUTPUT);
   pinMode(endLED, OUTPUT);
-  
+
   tcConfigure(SAMPLE_RATE);
 }
 
@@ -175,9 +227,14 @@ uint16_t counter = 1000;
 void loop() {
   counter++;
   if (counter > 100) {
-    ar.attack = analogRead(attackPot);  // we use this value in RANDOM mode
+    uint32_t trigger = digitalRead(triggerInput) == LOW ? HIGH : LOW; // trigger is inverted
+    ar.trigger = trigger;
+    if (trigger == LOW) {
+      ar.generated = false;
+    }
+
     uint32_t release = analogRead(releasePot) + 10;
-    uint32_t attack = ar.attack + 10;
+    uint32_t attack = analogRead(attackPot) + 10;
     ar.inc = (attack * freqScale) / SAMPLE_RATE;
     ar.dec = (release * freqScale) / SAMPLE_RATE;
 
@@ -195,23 +252,49 @@ void loop() {
         digitalWrite(endLED, LOW);
       }
     }
-    
+
     counter = 0;
-    
+
     // checking the mode switch
-    // this contains late early returns so doesn´t make sense to put something after
-    uint32_t ARMode = digitalRead(ARModeSwitch);
-    uint32_t RandomMode = digitalRead(RandomModeSwitch);
-    if (ARMode == HIGH && RandomMode == LOW) {
-      ar.modus = AR;
-      return;
+    uint32_t LFOMode = digitalRead(LFOModeSwitch)  == LOW ? HIGH : LOW;
+    uint32_t RandomMode = digitalRead(RandomModeSwitch) == LOW ? HIGH : LOW;
+    if (LFOMode == HIGH && RandomMode == LOW && ar.modus != LFO) {
+      ar.modus = START;
+      ar.state = ATTACK;
+      analogWrite(A0, 0);
+      digitalWrite(peakTrigger, LOW);
+      digitalWrite(peakLED, LOW);
+      ar.phase_accumulator = 0;
+      ar.random_accumulator = 0;
+      digitalWrite(endTrigger, LOW);
+      digitalWrite(endLED, LOW);
+      ar.modus = LFO;
     }
 
-    if (ARMode == LOW && RandomMode == HIGH) {
+    else if (LFOMode == LOW && RandomMode == HIGH && ar.modus != RANDOM) {
+      ar.modus = START;
+      analogWrite(A0, 0);
+      digitalWrite(peakTrigger, LOW);
+      digitalWrite(peakLED, LOW);
+      ar.phase_accumulator = 0;
+      ar.random_accumulator = 0;
+      digitalWrite(endTrigger, LOW);
+      digitalWrite(endLED, LOW);
+      ar.generated = false;
       ar.modus = RANDOM;
-      return;
     }
 
-    ar.modus = LFO;
+    else if (LFOMode == LOW && RandomMode == LOW && ar.modus != AR) {
+      ar.modus = START;
+      ar.state = END;
+      analogWrite(A0, 0);
+      digitalWrite(peakTrigger, LOW);
+      digitalWrite(peakLED, LOW);
+      ar.phase_accumulator = 0;
+      ar.random_accumulator = 0;
+      digitalWrite(endTrigger, LOW);
+      digitalWrite(endLED, LOW);
+      ar.modus = AR;
+    }
   }
 }
