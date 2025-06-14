@@ -179,11 +179,11 @@ void TC4_Handler() {
 
       // clock part
       accumulator += ar.dec;  // the release decrement is used as increment in this mode
-      if (accumulator >= peakValue) {
+      if (accumulator > peakValue) {
         accumulator = 0;
         digitalWrite(endTrigger, HIGH);
         digitalWrite(endLED, HIGH);
-        ar.endLEDCounter = 100;
+        ar.endLEDCounter = 300;
       }
       ar.phase_accumulator = accumulator;
 
